@@ -12,6 +12,7 @@ ENV/
 reports/*.csv
 *.csv
 *.numbers
+visitor_stats.json
 
 # macOS
 .DS_Store

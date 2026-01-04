@@ -5,7 +5,7 @@
 性能优化版本 - 添加缓存
 """
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,10 +18,53 @@ import pandas as pd
 from datetime import datetime
 import time
 import re
+from collections import defaultdict
+import json
 
 from stock_analyzer import StockAnalyzer, StockDataLoader, STOCK_INFO, TechnicalIndicators
 
 app = FastAPI(title="洛阳铲个股分析", version="1.0.0")
+
+# ========== 访问统计 ==========
+class VisitorStats:
+    def __init__(self):
+        self.stats_file = Path(__file__).parent / "visitor_stats.json"
+
+    def _load(self):
+        if self.stats_file.exists():
+            try:
+                return json.loads(self.stats_file.read_text())
+            except:
+                pass
+        return {'unique_ips': [], 'total_visits': 0, 'page_views': {}}
+
+    def _save(self, data):
+        data['last_updated'] = datetime.now().isoformat()
+        self.stats_file.write_text(json.dumps(data, ensure_ascii=False, indent=2))
+
+    def record_visit(self, ip: str, path: str):
+        try:
+            data = self._load()
+            data['total_visits'] = data.get('total_visits', 0) + 1
+            unique_ips = set(data.get('unique_ips', []))
+            unique_ips.add(ip)
+            data['unique_ips'] = list(unique_ips)
+            page_views = data.get('page_views', {})
+            page_views[path] = page_views.get(path, 0) + 1
+            data['page_views'] = page_views
+            self._save(data)
+        except Exception as e:
+            print(f"Stats error: {e}")
+
+    def get_stats(self):
+        data = self._load()
+        return {
+            'unique_visitors': len(data.get('unique_ips', [])),
+            'total_visits': data.get('total_visits', 0),
+            'top_pages': dict(sorted(data.get('page_views', {}).items(), key=lambda x: -x[1])[:10])
+        }
+
+visitor_stats = VisitorStats()
 
 # CORS配置
 app.add_middleware(
@@ -31,6 +74,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# 访问统计中间件
+@app.middleware("http")
+async def track_visits(request: Request, call_next):
+    response = await call_next(request)
+
+    # 获取真实IP（通过 Cloudflare 等代理）
+    ip = request.headers.get("CF-Connecting-IP") or \
+         request.headers.get("X-Forwarded-For", "").split(",")[0].strip() or \
+         (request.client.host if request.client else "unknown")
+    path = request.url.path
+
+    # 只统计主页访问
+    if path == "/" and response.status_code == 200:
+        visitor_stats.record_visit(ip, path)
+
+    return response
 
 # 目录配置
 BASE_DIR = Path(__file__).parent
@@ -397,6 +457,12 @@ async def preload_symbols(symbols: str):
     symbol_list = [s.strip().upper() for s in symbols.split(',')]
     cache.preload(symbol_list)
     return {"status": "ok", "preloaded": symbol_list}
+
+
+@app.get("/api/stats")
+async def get_visitor_stats():
+    """获取访问统计"""
+    return visitor_stats.get_stats()
 
 
 if __name__ == "__main__":
